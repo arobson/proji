@@ -1,6 +1,10 @@
 // Package setup bootstraps a fresh machine that doesn't have git installed
 // yet: installing git, generating an SSH key, configuring the user's git
-// identity, and registering the SSH key with GitHub.
+// identity, and registering the SSH key with GitHub. Every step is
+// idempotent: a step that's already done is skipped (with a message)
+// rather than repeated or treated as an error, so a command that failed
+// partway through — for a missing prerequisite, a network error, or
+// anything else — can simply be re-run to completion.
 package setup
 
 import (
@@ -13,6 +17,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/arobson/proji/internal/git"
 	"github.com/arobson/proji/internal/prompt"
 )
 
@@ -25,17 +30,23 @@ type SSHKeyRegistrar interface {
 
 // errXcodeInstallerTriggered is returned when macOS install falls back to
 // launching the (asynchronous, GUI) Xcode Command Line Tools installer;
-// Run stops immediately rather than treating it like a normal failure.
+// callers stop immediately rather than treating it like a normal failure.
 var errXcodeInstallerTriggered = errors.New("the Xcode Command Line Tools installer was opened; finish it, then run this command again")
 
-// Bootstrapper installs git and sets up a new machine to use it, when git
-// isn't already on PATH. Every field has a production default that's easy
-// to fake in tests.
+// Bootstrapper installs git and configures a machine to use it. Every field
+// has a production default that's easy to fake in tests.
 type Bootstrapper struct {
 	GOOS   string
 	Prompt prompt.Prompter
 	Out    io.Writer
+
+	// Runner executes interactive/system commands: package installs,
+	// ssh-keygen, sudo. Its output goes straight to the real terminal.
 	Runner CommandRunner
+
+	// GitRunner executes git subcommands whose output needs to be read
+	// (config gets, in particular), unlike Runner's fire-and-forget style.
+	GitRunner git.Runner
 
 	LookPath      func(file string) (string, error)
 	ReadOSRelease func() (map[string]string, error)
@@ -48,10 +59,21 @@ type Bootstrapper struct {
 	Authenticate func(ctx context.Context) (SSHKeyRegistrar, error)
 }
 
-// Run installs git (with the user's confirmation), generates an SSH key if
-// one doesn't already exist, configures the user's git identity, and
-// registers the SSH key with GitHub (or prints it for manual setup).
+// Run installs git (with the user's confirmation) and then configures it.
+// Callers that have already confirmed git is missing (the auto-triggered
+// bootstrap) use this; callers that want to configure an already-installed
+// git (the explicit "proji init" command) call InstallGit and ConfigureGit
+// separately so they can skip the install step entirely.
 func (b *Bootstrapper) Run(ctx context.Context) error {
+	if err := b.InstallGit(ctx); err != nil {
+		return err
+	}
+	return b.ConfigureGit(ctx)
+}
+
+// InstallGit asks the user to confirm installing git, then does so. It
+// assumes the caller has already established that git is missing.
+func (b *Bootstrapper) InstallGit(ctx context.Context) error {
 	confirmed, err := b.Prompt.Confirm("git isn't installed on this computer. Would you like proji to install it now?", true)
 	if err != nil {
 		return fmt.Errorf("ask about installing git: %w", err)
@@ -81,14 +103,30 @@ func (b *Bootstrapper) Run(ctx context.Context) error {
 		return errors.New("git still isn't available after attempting to install it. Try installing it yourself, then run this command again")
 	}
 	fmt.Fprintln(b.Out, "git is installed.")
+	return nil
+}
 
-	pubKeyPath, err := b.ensureSSHKey(ctx)
+// ConfigureGit sets the global default branch name and git identity (if
+// not already set), generates an SSH key (if one doesn't already exist),
+// and registers it with GitHub. Every step is skipped, with a message,
+// when it's already done — safe to call as often as needed.
+func (b *Bootstrapper) ConfigureGit(ctx context.Context) error {
+	home, err := b.HomeDir()
 	if err != nil {
-		return fmt.Errorf("set up an SSH key: %w", err)
+		return err
+	}
+	repo := git.NewRepo(b.GitRunner, home)
+
+	if err := b.ensureDefaultBranch(ctx, repo); err != nil {
+		return fmt.Errorf("set the default branch name: %w", err)
+	}
+	if err := b.ensureGitIdentity(ctx, repo); err != nil {
+		return fmt.Errorf("set up your git identity: %w", err)
 	}
 
-	if err := b.ensureGitIdentity(ctx); err != nil {
-		return fmt.Errorf("set up your git identity: %w", err)
+	pubKeyPath, err := b.ensureSSHKey(ctx, home)
+	if err != nil {
+		return fmt.Errorf("set up an SSH key: %w", err)
 	}
 
 	b.registerSSHKey(ctx, pubKeyPath)
@@ -117,20 +155,64 @@ func (b *Bootstrapper) installDebianFamily(ctx context.Context) error {
 	return nil
 }
 
+// ensureDefaultBranch sets git's global default branch name to "main",
+// skipping the write if it's already set that way.
+func (b *Bootstrapper) ensureDefaultBranch(ctx context.Context, repo *git.Repo) error {
+	const key = "init.defaultBranch"
+	current, ok, err := repo.ConfigGetGlobal(ctx, key)
+	if err != nil {
+		return err
+	}
+	if ok && current == "main" {
+		fmt.Fprintln(b.Out, `Default branch name is already set to "main", skipping.`)
+		return nil
+	}
+	if err := repo.ConfigSetGlobal(ctx, key, "main"); err != nil {
+		return err
+	}
+	fmt.Fprintln(b.Out, `Set the default branch name to "main".`)
+	return nil
+}
+
+// ensureGitIdentity sets user.name and user.email globally, skipping (and
+// not prompting for) whichever is already set.
+func (b *Bootstrapper) ensureGitIdentity(ctx context.Context, repo *git.Repo) error {
+	if err := b.ensureGlobalConfig(ctx, repo, "user.name", "name", "What name should git use for your commits? "); err != nil {
+		return err
+	}
+	return b.ensureGlobalConfig(ctx, repo, "user.email", "email", "What email should git use for your commits? ")
+}
+
+func (b *Bootstrapper) ensureGlobalConfig(ctx context.Context, repo *git.Repo, key, label, question string) error {
+	current, ok, err := repo.ConfigGetGlobal(ctx, key)
+	if err != nil {
+		return err
+	}
+	if ok && current != "" {
+		fmt.Fprintf(b.Out, "git %s is already set (%s), skipping.\n", label, current)
+		return nil
+	}
+	value, err := b.askNonEmpty(question)
+	if err != nil {
+		return err
+	}
+	if err := repo.ConfigSetGlobal(ctx, key, value); err != nil {
+		return err
+	}
+	fmt.Fprintf(b.Out, "Set git %s to %q.\n", label, value)
+	return nil
+}
+
 // ensureSSHKey generates a passphrase-less ECDSA-256 SSH key at the
 // standard location if one doesn't already exist there, and returns the
 // public key's path either way.
-func (b *Bootstrapper) ensureSSHKey(ctx context.Context) (string, error) {
-	home, err := b.HomeDir()
-	if err != nil {
-		return "", err
-	}
+func (b *Bootstrapper) ensureSSHKey(ctx context.Context, home string) (string, error) {
 	sshDir := filepath.Join(home, ".ssh")
 	privPath := filepath.Join(sshDir, "id_ecdsa")
 	pubPath := privPath + ".pub"
 
 	if _, err := os.Stat(pubPath); err == nil {
-		fmt.Fprintf(b.Out, "Using your existing SSH key at %s.\n", pubPath)
+		fmt.Fprintf(b.Out, "Using your existing SSH key at %s, skipping.\n", pubPath)
 		return pubPath, nil
 	} else if !os.IsNotExist(err) {
 		return "", err
@@ -144,24 +226,6 @@ func (b *Bootstrapper) ensureSSHKey(ctx context.Context) (string, error) {
 	}
 	fmt.Fprintf(b.Out, "Generated a new SSH key at %s.\n", pubPath)
 	return pubPath, nil
-}
-
-func (b *Bootstrapper) ensureGitIdentity(ctx context.Context) error {
-	name, err := b.askNonEmpty("What name should git use for your commits? ")
-	if err != nil {
-		return err
-	}
-	email, err := b.askNonEmpty("What email should git use for your commits? ")
-	if err != nil {
-		return err
-	}
-	if err := b.Runner.Run(ctx, "git", "config", "--global", "user.name", name); err != nil {
-		return fmt.Errorf("set git user.name: %w", err)
-	}
-	if err := b.Runner.Run(ctx, "git", "config", "--global", "user.email", email); err != nil {
-		return fmt.Errorf("set git user.email: %w", err)
-	}
-	return nil
 }
 
 func (b *Bootstrapper) askNonEmpty(question string) (string, error) {
@@ -178,8 +242,8 @@ func (b *Bootstrapper) askNonEmpty(question string) (string, error) {
 }
 
 // registerSSHKey is best-effort: it never fails the overall bootstrap.
-// When it can't sign in or the API call fails, it prints the key and
-// manual setup instructions instead.
+// When it can't sign in, the key is already registered, or the API call
+// fails, it prints the key and manual setup instructions instead.
 func (b *Bootstrapper) registerSSHKey(ctx context.Context, pubKeyPath string) {
 	pubKeyBytes, err := os.ReadFile(pubKeyPath) // #nosec G304 -- path is built internally from HomeDir(), never user input
 	if err != nil {
@@ -206,7 +270,7 @@ func (b *Bootstrapper) registerSSHKey(ctx context.Context, pubKeyPath string) {
 	}
 	if err := registrar.AddSSHKey(ctx, title, pubKey); err != nil {
 		if strings.Contains(err.Error(), "key is already in use") {
-			fmt.Fprintln(b.Out, "This SSH key is already registered with a GitHub account.")
+			fmt.Fprintln(b.Out, "This SSH key is already registered with a GitHub account, skipping.")
 			return
 		}
 		fmt.Fprintf(b.Out, "Could not register your SSH key with GitHub automatically: %v\n", err)

@@ -273,6 +273,52 @@ func TestRepo_Push(t *testing.T) {
 	assertLastCallArgs(t, fr, []string{"push", "-u", "origin", "HEAD"})
 }
 
+func TestRepo_ConfigGetGlobal(t *testing.T) {
+	t.Run("set", func(t *testing.T) {
+		fr := &gittest.FakeRunner{Responses: []*gittest.Response{
+			{Match: gittest.MatchPrefix("config", "--global", "--get", "user.name"), Stdout: "Ada Lovelace\n"},
+		}}
+		repo := git.NewRepo(fr, "/work")
+		value, ok, err := repo.ConfigGetGlobal(context.Background(), "user.name")
+		if err != nil || !ok || value != "Ada Lovelace" {
+			t.Fatalf("ConfigGetGlobal() = %q, %v, %v, want %q, true, nil", value, ok, err, "Ada Lovelace")
+		}
+	})
+	t.Run("unset", func(t *testing.T) {
+		fr := &gittest.FakeRunner{Responses: []*gittest.Response{
+			{
+				Match: gittest.MatchPrefix("config", "--global", "--get", "user.name"),
+				Err:   &git.ExitError{ExitCode: 1},
+			},
+		}}
+		repo := git.NewRepo(fr, "/work")
+		value, ok, err := repo.ConfigGetGlobal(context.Background(), "user.name")
+		if err != nil || ok || value != "" {
+			t.Fatalf("ConfigGetGlobal() = %q, %v, %v, want \"\", false, nil", value, ok, err)
+		}
+	})
+	t.Run("other error propagates", func(t *testing.T) {
+		wantErr := errors.New("boom")
+		fr := &gittest.FakeRunner{Responses: []*gittest.Response{
+			{Match: gittest.MatchPrefix("config", "--global", "--get", "user.name"), Err: wantErr},
+		}}
+		repo := git.NewRepo(fr, "/work")
+		_, _, err := repo.ConfigGetGlobal(context.Background(), "user.name")
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("ConfigGetGlobal() error = %v, want %v", err, wantErr)
+		}
+	})
+}
+
+func TestRepo_ConfigSetGlobal(t *testing.T) {
+	fr := &gittest.FakeRunner{Responses: []*gittest.Response{{Match: gittest.MatchPrefix("config", "--global")}}}
+	repo := git.NewRepo(fr, "/work")
+	if err := repo.ConfigSetGlobal(context.Background(), "user.name", "Ada Lovelace"); err != nil {
+		t.Fatalf("ConfigSetGlobal() error = %v", err)
+	}
+	assertLastCallArgs(t, fr, []string{"config", "--global", "user.name", "Ada Lovelace"})
+}
+
 func assertLastCallArgs(t *testing.T, fr *gittest.FakeRunner, want []string) {
 	t.Helper()
 	if len(fr.Calls) == 0 {

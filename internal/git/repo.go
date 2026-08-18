@@ -155,3 +155,23 @@ func (r *Repo) Push(ctx context.Context, remote, ref string) error {
 	_, _, err := r.runner.Run(ctx, r.dir, "push", "-u", remote, ref)
 	return err
 }
+
+// ConfigGetGlobal reads a global git config value. ok is false (with a nil
+// error) when the key simply isn't set.
+func (r *Repo) ConfigGetGlobal(ctx context.Context, key string) (value string, ok bool, err error) {
+	stdout, _, err := r.runner.Run(ctx, r.dir, "config", "--global", "--get", key)
+	if err != nil {
+		var exitErr *ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode == 1 {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return strings.TrimSpace(stdout), true, nil
+}
+
+// ConfigSetGlobal sets a global git config value.
+func (r *Repo) ConfigSetGlobal(ctx context.Context, key, value string) error {
+	_, _, err := r.runner.Run(ctx, r.dir, "config", "--global", key, value)
+	return err
+}

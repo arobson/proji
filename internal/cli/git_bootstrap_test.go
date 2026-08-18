@@ -14,7 +14,7 @@ func TestEnsureGit_SkipsBootstrapWhenGitFound(t *testing.T) {
 	bootstrapRan := false
 	td.Deps.NewBootstrapper = func() cli.GitBootstrapper {
 		bootstrapRan = true
-		return stubBootstrapper{}
+		return &stubBootstrapper{}
 	}
 	td.Runner.Responses = []*gittest.Response{
 		{Match: gittest.MatchPrefix("rev-parse", "--is-inside-work-tree"), Stdout: "true\n"},
@@ -36,7 +36,7 @@ func TestEnsureGit_RunsBootstrapWhenGitMissing(t *testing.T) {
 	bootstrapRan := false
 	td.Deps.NewBootstrapper = func() cli.GitBootstrapper {
 		bootstrapRan = true
-		return stubBootstrapper{err: errors.New("git is required to use proji. Install it, then run this command again")}
+		return &stubBootstrapper{runErr: errors.New("git is required to use proji. Install it, then run this command again")}
 	}
 
 	err := runCLI(t, td.Deps, "checkin")
@@ -58,7 +58,7 @@ func TestEnsureGit_ProceedsAfterSuccessfulBootstrap(t *testing.T) {
 	td := newTestDeps(t)
 	td.Deps.LookPath = func(string) (string, error) { return "", errors.New("not found") }
 	td.Deps.NewBootstrapper = func() cli.GitBootstrapper {
-		return stubBootstrapper{} // succeeds
+		return &stubBootstrapper{} // succeeds
 	}
 	// No responses are scripted on td.Runner, so IsGitRepo's underlying
 	// call fails and it reports "not a git repository" — proving

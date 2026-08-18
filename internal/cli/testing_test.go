@@ -28,6 +28,10 @@ type fakeGitHubAPI struct {
 	createErr    error
 	createCalls  []string // repo name for each CreateRepo call
 
+	getRepoResult ghclient.RepoResult
+	getRepoErr    error    // defaults to ghclient.ErrRepoNotFound if zero-value; set explicitly to override
+	getRepoCalls  []string // "owner/name" for each GetRepo call
+
 	currentUser    string
 	currentUserErr error
 
@@ -43,6 +47,17 @@ func (f *fakeGitHubAPI) ForkRepo(_ context.Context, owner, repo string) (ghclien
 func (f *fakeGitHubAPI) CreateRepo(_ context.Context, name string, _ bool) (ghclient.RepoResult, error) {
 	f.createCalls = append(f.createCalls, name)
 	return f.createResult, f.createErr
+}
+
+func (f *fakeGitHubAPI) GetRepo(_ context.Context, owner, name string) (ghclient.RepoResult, error) {
+	f.getRepoCalls = append(f.getRepoCalls, owner+"/"+name)
+	if f.getRepoErr != nil {
+		return ghclient.RepoResult{}, f.getRepoErr
+	}
+	if f.getRepoResult == (ghclient.RepoResult{}) {
+		return ghclient.RepoResult{}, ghclient.ErrRepoNotFound
+	}
+	return f.getRepoResult, nil
 }
 
 func (f *fakeGitHubAPI) CurrentUser(_ context.Context) (string, error) {
@@ -98,21 +113,49 @@ func newTestDeps(t *testing.T) *testDeps {
 		// override LookPath and NewBootstrapper themselves.
 		LookPath: func(string) (string, error) { return "/usr/bin/git", nil },
 		NewBootstrapper: func() cli.GitBootstrapper {
-			return stubBootstrapper{err: errors.New("bootstrap should not run when git is already found")}
+			return &stubBootstrapper{runErr: errors.New("bootstrap should not run when git is already found")}
 		},
-		Now:   func() time.Time { return now },
-		Getwd: func() (string, error) { return cwd, nil },
+		NewUpgrader: func() cli.Upgrader {
+			return &stubUpgrader{}
+		},
+		Now:     func() time.Time { return now },
+		Getwd:   func() (string, error) { return cwd, nil },
+		Version: "proji-vtest",
 	}
 
 	return &testDeps{Deps: deps, Out: out, Runner: runner, GitHub: gh, Prompt: p, Cwd: cwd, NowTime: now}
 }
 
-// stubBootstrapper is a minimal cli.GitBootstrapper test double.
+// stubBootstrapper is a minimal cli.GitBootstrapper test double, tracking
+// whether each of its three methods was invoked.
 type stubBootstrapper struct {
-	err error
+	runErr, installErr, configureErr          error
+	runCalled, installCalled, configureCalled bool
 }
 
-func (s stubBootstrapper) Run(context.Context) error {
+func (s *stubBootstrapper) Run(context.Context) error {
+	s.runCalled = true
+	return s.runErr
+}
+
+func (s *stubBootstrapper) InstallGit(context.Context) error {
+	s.installCalled = true
+	return s.installErr
+}
+
+func (s *stubBootstrapper) ConfigureGit(context.Context) error {
+	s.configureCalled = true
+	return s.configureErr
+}
+
+// stubUpgrader is a minimal cli.Upgrader test double.
+type stubUpgrader struct {
+	err    error
+	called bool
+}
+
+func (s *stubUpgrader) Run(context.Context) error {
+	s.called = true
 	return s.err
 }
 

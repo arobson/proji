@@ -2,6 +2,7 @@ package ghclient_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -220,5 +221,46 @@ func TestClient_AddSSHKey_AlreadyInUse(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "key is already in use") {
 		t.Errorf("AddSSHKey() error = %q, want it to mention the key is already in use", err.Error())
+	}
+}
+
+func TestClient_GetRepo(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/learner/my-project", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{
+			"name": "my-project",
+			"owner": {"login": "learner"},
+			"html_url": "https://github.com/learner/my-project",
+			"clone_url": "https://github.com/learner/my-project.git"
+		}`)
+	})
+
+	client := newTestClient(t, mux)
+	result, err := client.GetRepo(context.Background(), "learner", "my-project")
+	if err != nil {
+		t.Fatalf("GetRepo() error = %v", err)
+	}
+	want := ghclient.RepoResult{
+		Owner:    "learner",
+		Repo:     "my-project",
+		HTMLURL:  "https://github.com/learner/my-project",
+		CloneURL: "https://github.com/learner/my-project.git",
+	}
+	if result != want {
+		t.Errorf("GetRepo() = %+v, want %+v", result, want)
+	}
+}
+
+func TestClient_GetRepo_NotFound(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/learner/does-not-exist", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"message":"Not Found"}`)
+	})
+
+	client := newTestClient(t, mux)
+	_, err := client.GetRepo(context.Background(), "learner", "does-not-exist")
+	if !errors.Is(err, ghclient.ErrRepoNotFound) {
+		t.Fatalf("GetRepo() error = %v, want ErrRepoNotFound", err)
 	}
 }

@@ -19,6 +19,9 @@ const (
 	defaultPollTimeout  = 90 * time.Second
 )
 
+// ErrRepoNotFound is returned by GetRepo when no such repository exists.
+var ErrRepoNotFound = errors.New("repository not found")
+
 // RepoResult describes a repository proji forked or created (or confirmed
 // already exists).
 type RepoResult struct {
@@ -121,6 +124,23 @@ func (c *Client) CreateRepo(ctx context.Context, name string, private bool) (Rep
 		Repo:     repoName,
 		HTMLURL:  created.GetHTMLURL(),
 		CloneURL: created.GetCloneURL(),
+	}, nil
+}
+
+// GetRepo fetches owner/repo, returning ErrRepoNotFound if it doesn't exist.
+func (c *Client) GetRepo(ctx context.Context, owner, repo string) (RepoResult, error) {
+	found, resp, err := c.gh.Repositories.Get(ctx, owner, repo)
+	if err != nil {
+		if resp != nil && resp.StatusCode == http.StatusNotFound {
+			return RepoResult{}, ErrRepoNotFound
+		}
+		return RepoResult{}, fmt.Errorf("get repository %s/%s: %w", owner, repo, err)
+	}
+	return RepoResult{
+		Owner:    found.GetOwner().GetLogin(),
+		Repo:     found.GetName(),
+		HTMLURL:  found.GetHTMLURL(),
+		CloneURL: found.GetCloneURL(),
 	}, nil
 }
 

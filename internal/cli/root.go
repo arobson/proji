@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"runtime"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -17,6 +18,7 @@ import (
 	"github.com/arobson/proji/internal/git"
 	"github.com/arobson/proji/internal/prompt"
 	"github.com/arobson/proji/internal/setup"
+	"github.com/arobson/proji/internal/upgrade"
 )
 
 // githubOAuthClientID is proji's registered GitHub OAuth App, used for
@@ -25,19 +27,39 @@ import (
 // and never involves a client secret, so it's safe to bake this in.
 const githubOAuthClientID = "Ov23liBp5u8GXm72iuL6"
 
+// projiRepo is proji's own GitHub repo, used by "proji upgrade" to check
+// for and download new releases.
+const projiRepo = "arobson/proji"
+
 // GitHubAPI is the subset of ghclient.Client that commands need. Command
 // tests inject a hand-written fake instead of standing up an httptest
 // server, since ghclient's own tests already cover the HTTP layer.
 type GitHubAPI interface {
 	ForkRepo(ctx context.Context, owner, repo string) (ghclient.RepoResult, error)
 	CreateRepo(ctx context.Context, name string, private bool) (ghclient.RepoResult, error)
+	GetRepo(ctx context.Context, owner, name string) (ghclient.RepoResult, error)
 	CurrentUser(ctx context.Context) (string, error)
 	AddSSHKey(ctx context.Context, title, publicKey string) error
 }
 
-// GitBootstrapper installs and initializes git on a machine that doesn't
-// have it yet. It's satisfied by *setup.Bootstrapper.
+// GitBootstrapper installs and configures git on this machine. It's
+// satisfied by *setup.Bootstrapper.
 type GitBootstrapper interface {
+	// Run installs git (assuming the caller confirmed it's missing) and
+	// then configures it; used by the auto-triggered bootstrap.
+	Run(ctx context.Context) error
+	// InstallGit installs git alone, assuming the caller confirmed it's
+	// missing. Used by "proji init", which skips calling it entirely
+	// when git is already present.
+	InstallGit(ctx context.Context) error
+	// ConfigureGit sets up identity, default branch, and SSH key,
+	// idempotently. Used by "proji init" unconditionally.
+	ConfigureGit(ctx context.Context) error
+}
+
+// Upgrader checks for and installs a newer proji release. It's satisfied
+// by *upgrade.Upgrader.
+type Upgrader interface {
 	Run(ctx context.Context) error
 }
 
@@ -66,12 +88,19 @@ type Deps struct {
 	// whether git itself is installed before any command that needs it.
 	LookPath func(file string) (string, error)
 
-	// NewBootstrapper builds a GitBootstrapper to install and initialize
-	// git when LookPath reports it's missing.
+	// NewBootstrapper builds a GitBootstrapper to install and/or configure
+	// git.
 	NewBootstrapper func() GitBootstrapper
+
+	// NewUpgrader builds an Upgrader for "proji upgrade".
+	NewUpgrader func() Upgrader
 
 	Now   func() time.Time
 	Getwd func() (string, error)
+
+	// Version is this binary's own build-time version (main.version),
+	// used by "proji upgrade" to decide whether a newer release exists.
+	Version string
 
 	ClientID      string
 	OAuthEndpoint oauth2.Endpoint
@@ -104,14 +133,15 @@ func DefaultDeps() *Deps {
 		ClientID: githubOAuthClientID,
 	}
 
-	// NewBootstrapper is wired after deps is constructed so its
-	// Authenticate callback can capture deps itself (only invoked much
-	// later, when a command actually needs to bootstrap git).
+	// NewBootstrapper and NewUpgrader are wired after deps is constructed
+	// so their callbacks can capture deps itself (only invoked much
+	// later, when a command actually needs them).
 	deps.NewBootstrapper = func() GitBootstrapper {
 		return &setup.Bootstrapper{
 			Prompt:        deps.Prompt,
 			Out:           deps.Out,
 			Runner:        setup.ExecCommandRunner{},
+			GitRunner:     git.NewExecRunner(),
 			LookPath:      deps.LookPath,
 			ReadOSRelease: setup.ReadOSRelease,
 			HomeDir:       os.UserHomeDir,
@@ -120,6 +150,17 @@ func DefaultDeps() *Deps {
 				_, client, err := ensureGitHubToken(ctx, deps)
 				return client, err
 			},
+		}
+	}
+	deps.NewUpgrader = func() Upgrader {
+		return &upgrade.Upgrader{
+			Repo:           projiRepo,
+			CurrentVersion: deps.Version,
+			GOOS:           runtime.GOOS,
+			GOARCH:         runtime.GOARCH,
+			Out:            deps.Out,
+			ExecutablePath: os.Executable,
+			Runner:         setup.ExecCommandRunner{},
 		}
 	}
 
@@ -139,11 +180,14 @@ func NewRootCmd(deps *Deps) *cobra.Command {
 	root.SetIn(deps.In)
 
 	root.AddCommand(
+		newInitCmd(deps),
 		newCopyCmd(deps),
 		newCreateCmd(deps),
+		newAddCmd(deps),
 		newCheckCmd(deps),
 		newCheckoutCmd(deps),
 		newCheckinCmd(deps),
+		newUpgradeCmd(deps),
 	)
 	return root
 }

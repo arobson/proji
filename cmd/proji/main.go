@@ -12,7 +12,9 @@ import (
 var version = "dev"
 
 func main() {
-	root := cli.NewRootCmd(cli.DefaultDeps())
+	deps := cli.DefaultDeps()
+	deps.Version = version
+	root := cli.NewRootCmd(deps)
 	root.Version = version
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
