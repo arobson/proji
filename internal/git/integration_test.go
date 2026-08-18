@@ -52,7 +52,11 @@ func newRemoteAndClone(t *testing.T) (remoteDir, cloneDir string) {
 	seedDir := filepath.Join(base, "seed")
 	cloneDir = filepath.Join(base, "clone")
 
-	runGit(t, base, "init", "--bare", remoteDir)
+	// -b main pins the bare repo's HEAD symref explicitly. Without it, HEAD's
+	// resolution depends on the system's init.defaultBranch (unset on a
+	// fresh machine) and can vary by git version, which is exactly what
+	// caused clones below to sometimes land on an unexpected branch.
+	runGit(t, base, "init", "--bare", "-b", "main", remoteDir)
 
 	if err := os.MkdirAll(seedDir, 0o755); err != nil {
 		t.Fatal(err)
