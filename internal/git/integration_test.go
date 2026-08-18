@@ -36,9 +36,17 @@ func writeFile(t *testing.T, path, contents string) {
 }
 
 // newRemoteAndClone creates a bare "remote" repo with one commit and a
-// working clone of it, returning both directories.
+// working clone of it, returning both directories. It also sets a git
+// identity for the whole test via env vars, since commits made through
+// the real ExecRunner (not just the runGit helper) need one too, and a
+// clean CI runner has no global git config at all.
 func newRemoteAndClone(t *testing.T) (remoteDir, cloneDir string) {
 	t.Helper()
+	t.Setenv("GIT_AUTHOR_NAME", "proji-test")
+	t.Setenv("GIT_AUTHOR_EMAIL", "proji-test@example.com")
+	t.Setenv("GIT_COMMITTER_NAME", "proji-test")
+	t.Setenv("GIT_COMMITTER_EMAIL", "proji-test@example.com")
+
 	base := t.TempDir()
 	remoteDir = filepath.Join(base, "remote.git")
 	seedDir := filepath.Join(base, "seed")

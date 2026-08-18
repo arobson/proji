@@ -23,6 +23,12 @@ jobs:
       - uses: golangci/golangci-lint-action@v6
         with:
           version: v1.64.8
+          # The v1.64.8 binary golangci-lint publishes was built with an
+          # older Go than go.mod now targets, and golangci-lint refuses to
+          # lint a newer target than it was built with. goinstall compiles
+          # it from source using the runner's own (matching) Go toolchain
+          # instead of downloading that stale prebuilt binary.
+          install-mode: goinstall
 
   test:
     runs-on: ubuntu-latest
