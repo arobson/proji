@@ -1,0 +1,86 @@
+name: release-please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  build-release-binaries:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags "-X main.version=${{ needs.release-please.outputs.tag_name }}" -o dist/proji-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/proji
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/proji-${{ matrix.goos }}-${{ matrix.goarch }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: proji-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/proji-${{ matrix.goos }}-${{ matrix.goarch }}
+      - name: Attach to the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ needs.release-please.outputs.tag_name }}" "dist/proji-${{ matrix.goos }}-${{ matrix.goarch }}" --clobber
+
+  checksums:
+    needs: [release-please, build-release-binaries]
+    if: ${{ needs.release-please.outputs.release_created }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: proji-*
+          path: dist
+          merge-multiple: true
+      - name: Generate checksums.txt
+        run: |
+          cd dist
+          sha256sum proji-* > checksums.txt
+          cat checksums.txt
+      - name: Attach checksums to the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ needs.release-please.outputs.tag_name }}" "dist/checksums.txt" --clobber

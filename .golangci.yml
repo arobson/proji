@@ -1,0 +1,30 @@
+run:
+  timeout: 5m
+
+linters:
+  disable-all: true
+  enable:
+    - errcheck
+    - govet
+    - gosimple
+    - staticcheck
+    - unused
+    - ineffassign
+    - gofmt
+    - goimports
+    - revive
+    - bodyclose
+    - misspell
+    - unconvert
+    - unparam
+    - gocritic
+
+issues:
+  exclude-dirs:
+    - bin
+  exclude-rules:
+    # internal/cli's errors are user-facing sentences printed directly by
+    # cobra (capitalized, punctuated) rather than library errors meant to
+    # be wrapped further, so the usual ST1005 convention doesn't apply.
+    - path: internal/cli/
+      text: "ST1005"
