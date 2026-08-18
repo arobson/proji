@@ -63,7 +63,7 @@ jobs:
       - name: Attach to the GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ needs.release-please.outputs.tag_name }}" "dist/proji-${{ matrix.goos }}-${{ matrix.goarch }}" --clobber
+        run: gh release upload "${{ needs.release-please.outputs.tag_name }}" "dist/proji-${{ matrix.goos }}-${{ matrix.goarch }}" --clobber -R "${{ github.repository }}"
 
   checksums:
     needs: [release-please, build-release-binaries]
@@ -83,4 +83,6 @@ jobs:
       - name: Attach checksums to the GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ needs.release-please.outputs.tag_name }}" "dist/checksums.txt" --clobber
+        # -R is required here: unlike build-release-binaries, this job never
+        # checks out the repo, so gh has no local git remote to infer it from.
+        run: gh release upload "${{ needs.release-please.outputs.tag_name }}" "dist/checksums.txt" --clobber -R "${{ github.repository }}"
